@@ -1,3 +1,8 @@
+/*
+ * copyright (c) 2015ff IST GmbH Dresden, Germany - https://www.ist-software.com
+ *
+ * This software may be modified and distributed under the terms of the MIT license.
+ */
 package com.composum.sling.core.util;
 
 import com.composum.sling.core.ResourceHandle;
@@ -9,6 +14,7 @@ import org.apache.tika.mime.MimeType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.servlet.http.HttpServletRequest;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -26,13 +32,15 @@ public class LinkUtil {
     public static final String PROP_TARGET = "sling:target";
     public static final String PROP_REDIRECT = "sling:redirect";
 
+    public static final String FORWARDED_PROTO = "X-Forwarded-Proto";
+    public static final String FORWARDED_PROTO_HTTPS = "https";
     public static final String FORWARDED_SSL_HEADER = "X-Forwarded-SSL";
     public static final String FORWARDED_SSL_ON = "on";
 
-    public static final String URL_PATTERN_STRING = "^(?:(https?|mailto|tel):)?//([^/]+)(:\\d+)?(/.*)?$";
-    public static final Pattern URL_PATTERN = Pattern.compile(URL_PATTERN_STRING);
+    public static final String URL_PATTERN_STRING = "^(?:(https?):)?//([^/]+)(:\\d+)?(/.*)?$";
+    public static final Pattern URL_PATTERN = Pattern.compile(URL_PATTERN_STRING, Pattern.CASE_INSENSITIVE);
     public static final String SPECIAL_URL_STRING = "^(?:(mailto|tel):)(.+)$";
-    public static final Pattern SPECIAL_URL_PATTERN = Pattern.compile(SPECIAL_URL_STRING);
+    public static final Pattern SPECIAL_URL_PATTERN = Pattern.compile(SPECIAL_URL_STRING, Pattern.CASE_INSENSITIVE);
 
     public static final Pattern SELECTOR_PATTERN = Pattern.compile("^(.*/[^/]+)(\\.[^.]+)$");
 
@@ -114,11 +122,13 @@ public class LinkUtil {
             return url;
         }
 
+        String result = url;
+
         // rebuild URL if not always external only
-        if (!isExternalUrl(url)) {
+        if (!isExternalUrl(result)) {
 
             ResourceResolver resolver = request.getResourceResolver();
-            ResourceHandle resource = ResourceHandle.use(resolver.getResource(url));
+            ResourceHandle resource = ResourceHandle.use(resolver.getResource(result));
 
             // it's possible that the resource can not be resolved / is virtual but is valid...
             if (resource.isValid()) {
@@ -140,12 +150,12 @@ public class LinkUtil {
 
             // map the path (the url) with the resource resolver (encodes the url)
             if (mapper != null) {
-                url = mapper.mapUri(request, url);
-                url = adjustMappedUrl(request, url);
+                result = mapper.mapUri(request, result);
+                result = adjustMappedUrl(request, result);
             }
 
             if (StringUtils.isNotBlank(extension)) {
-                url += extension;   // extension starts with a '.'
+                result += extension;   // extension starts with a '.'
             }
 
             // inject selectors into the complete URL because
@@ -155,13 +165,16 @@ public class LinkUtil {
                     selectors = "." + selectors;
                 }
 
-                Matcher matcher = SELECTOR_PATTERN.matcher(url);
+                Matcher matcher = SELECTOR_PATTERN.matcher(result);
                 if (matcher.matches()) {
-                    url = matcher.group(1) + selectors + matcher.group(2);
+                    result = matcher.group(1) + selectors + matcher.group(2);
                 }
             }
+            result = LinkUtil.encodeUrl(result);
         }
-        return url;
+
+        LOG.debug("Mapped '{}' to '{}'", url, result);
+        return result;
     }
 
     /**
@@ -169,7 +182,6 @@ public class LinkUtil {
      *
      * @param request the request as the externalization context
      * @param url     the url value (the local URL)
-     * @return
      */
     public static String getAbsoluteUrl(SlingHttpServletRequest request, String url) {
         if (!isExternalUrl(url) && url.startsWith("/")) {
@@ -191,10 +203,12 @@ public class LinkUtil {
     }
 
     public static int getDefaultPort(SlingHttpServletRequest request) {
-        if (!request.isSecure()) {
-            return 80;
-        }
-        return FORWARDED_SSL_ON.equalsIgnoreCase(request.getHeader(FORWARDED_SSL_HEADER)) ? 80 : 443;
+        return request.isSecure() || isForwaredSSL(request) ? 443 : 80;
+    }
+
+    public static boolean isForwaredSSL(HttpServletRequest request) {
+        return FORWARDED_SSL_ON.equalsIgnoreCase(request.getHeader(FORWARDED_SSL_HEADER)) ||
+                FORWARDED_PROTO.equalsIgnoreCase(request.getHeader(FORWARDED_PROTO_HTTPS));
     }
 
     /**
@@ -243,8 +257,7 @@ public class LinkUtil {
      */
     public static String getFinalTarget(Resource resource) throws RedirectLoopException {
         ResourceHandle handle = ResourceHandle.use(resource);
-        String finalTarget = getFinalTarget(handle, new ArrayList<String>());
-        return finalTarget;
+        return getFinalTarget(handle, new ArrayList<>());
     }
 
     /**
@@ -384,13 +397,32 @@ public class LinkUtil {
      * @param path the path to encode
      * @return the URL encoded path
      */
+    public static String encodeUrl(String path) {
+        if (path != null) {
+            path = path.replaceAll(">", "%3E");
+            path = path.replaceAll("<", "%3C");
+            path = path.replaceAll(" ", "%20");
+        }
+        return path;
+    }
+
+    /**
+     * URL encoding for a resource path (without the encoding for the '/' path delimiters).
+     *
+     * @param path the path to encode
+     * @return the URL encoded path
+     */
     public static String encodePath(String path) {
         if (path != null) {
+            path = encodeUrl(path);
             path = path.replaceAll("/jcr:", "/_jcr_");
-            path = path.replaceAll("&", "%26");
-            path = path.replaceAll(":", "%3A");
+            path = path.replaceAll("\\?", "%3F");
+            path = path.replaceAll("=", "%3D");
             path = path.replaceAll(";", "%3B");
-            path = path.replaceAll(" ", "%20");
+            path = path.replaceAll(":", "%3A");
+            path = path.replaceAll("\\+", "%2B");
+            path = path.replaceAll("&", "%26");
+            path = path.replaceAll("#", "%23");
         }
         return path;
     }

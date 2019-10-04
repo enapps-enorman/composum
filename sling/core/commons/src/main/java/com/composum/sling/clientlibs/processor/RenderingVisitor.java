@@ -34,7 +34,7 @@ public class RenderingVisitor extends AbstractClientlibVisitor {
                                LinkedHashSet<ClientlibLink> processedElements) {
         super(owner, context.getClientlibService(), context.getResolver(), processedElements);
         this.context = context;
-        this.linksToRender = linksToRender != null ? linksToRender : new ArrayList<ClientlibLink>();
+        this.linksToRender = linksToRender != null ? linksToRender : new ArrayList<>();
         this.ownerWasAlreadyRendered = context.isClientlibRendered(owner.getRef());
     }
 
@@ -51,14 +51,13 @@ public class RenderingVisitor extends AbstractClientlibVisitor {
 
     @Override
     public void action(ClientlibCategory clientlibCategory, ClientlibVisitor.VisitorMode mode,
-                       ClientlibResourceFolder parent) throws IOException, RepositoryException {
+                       ClientlibResourceFolder parent) {
         if (hasEmbeddedFiles && !context.getConfiguration().getDebug()) render(mode, clientlibCategory, parent);
         else context.registerClientlibLink(clientlibCategory.makeLink(), parent);
     }
 
     @Override
-    public void action(Clientlib clientlib, ClientlibVisitor.VisitorMode mode, ClientlibResourceFolder parent) throws
-            IOException, RepositoryException {
+    public void action(Clientlib clientlib, ClientlibVisitor.VisitorMode mode, ClientlibResourceFolder parent) {
         if (hasEmbeddedFiles && !context.getConfiguration().getDebug()) render(mode, clientlib, parent);
         else context.registerClientlibLink(clientlib.makeLink(), parent);
     }
@@ -107,6 +106,10 @@ public class RenderingVisitor extends AbstractClientlibVisitor {
             LOG.warn("Not present and contains , - should probably be a multi " +
                     "string: " +
                     "{} references {}", parent, ref);
-        else LOG.info("Not present: {} referenced from {}", ref, parent);
+        else if (ref.optional) {
+            LOG.debug("Not present: opt. {} referenced from {}", ref, parent);
+        } else {
+            LOG.warn("Not present: mand. {} referenced from {}", ref, parent);
+        }
     }
 }

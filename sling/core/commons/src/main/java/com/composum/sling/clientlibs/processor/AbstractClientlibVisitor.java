@@ -3,13 +3,17 @@ package com.composum.sling.clientlibs.processor;
 import com.composum.sling.clientlibs.handle.*;
 import com.composum.sling.clientlibs.service.ClientlibService;
 import org.apache.commons.codec.binary.Base64;
+import org.apache.sling.api.resource.Resource;
 import org.apache.sling.api.resource.ResourceResolver;
 import org.slf4j.Logger;
 
 import javax.jcr.RepositoryException;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -52,7 +56,7 @@ public abstract class AbstractClientlibVisitor implements ClientlibVisitor {
         this.service = service;
         this.resolver = resolver;
         this.owner = owner;
-        this.processedElements = null != processedElements ? processedElements : new LinkedHashSet<ClientlibLink>();
+        this.processedElements = null != processedElements ? processedElements : new LinkedHashSet<>();
     }
 
     /**
@@ -80,7 +84,7 @@ public abstract class AbstractClientlibVisitor implements ClientlibVisitor {
                 clientlib.accept(this, EMBEDDED, null);
             action(category, mode, parent);
             markAsProcessed(category.makeLink(), parent, mode);
-        } else notPresent(category.getRef(), mode, parent);
+        } else alreadyProcessed(category.getRef(), mode, parent);
         LOG.trace("<<< {} => {}", category, hasEmbeddedFiles);
     }
 
@@ -94,7 +98,7 @@ public abstract class AbstractClientlibVisitor implements ClientlibVisitor {
             if (null != folder) folder.accept(this, mode, null);
             action(clientlib, mode, parent);
             markAsProcessed(clientlib.makeLink(), parent, mode);
-        } else notPresent(clientlib.getRef(), mode, parent);
+        } else alreadyProcessed(clientlib.getRef(), mode, parent);
         LOG.trace("<<< {} => {}", clientlib, hasEmbeddedFiles);
     }
 
@@ -109,10 +113,39 @@ public abstract class AbstractClientlibVisitor implements ClientlibVisitor {
         VisitorMode embeddingMode = embedding ? EMBEDDED : DEPENDS;
         for (ClientlibRef embedded : folder.getEmbedded())
             resolveAndAccept(embedded, embeddingMode, folder);
-        for (ClientlibElement child : folder.getChildren())
+        for (ClientlibElement child : removeMinificationDuplicates(folder.getChildren()))
             child.accept(getVisitorFor(mode, child), embeddingMode, folder);
         action(folder, mode, parent);
         LOG.trace("<<< {} => {}", folder, hasEmbeddedFiles);
+    }
+
+    protected List<ClientlibElement> removeMinificationDuplicates(List<ClientlibElement> children) {
+        Set<String> duplicatesToRemove = new HashSet<>();
+        for (ClientlibElement child : children) {
+            if (child instanceof ClientlibFile) {
+                ClientlibFile file = (ClientlibFile) child;
+                Resource resource = file.handle.getResource();
+                Resource minified = service.getMinifiedSibling(resource);
+                if (!minified.getPath().equals(resource.getPath())) {
+                    if (service.getClientlibConfig().getUseMinifiedFiles())
+                        duplicatesToRemove.add(resource.getPath());
+                    else
+                        duplicatesToRemove.add(minified.getPath());
+                }
+            }
+        }
+
+        List<ClientlibElement> result = new ArrayList<>();
+        for (ClientlibElement child : children) {
+            if (child instanceof ClientlibFile) {
+                ClientlibFile file = (ClientlibFile) child;
+                if (!duplicatesToRemove.contains(file.handle.getPath()))
+                    result.add(child);
+            } else {
+                result.add(child);
+            }
+        }
+        return result;
     }
 
     @Override
@@ -126,7 +159,7 @@ public abstract class AbstractClientlibVisitor implements ClientlibVisitor {
             }
             action(file, mode, parent);
             markAsProcessed(file.makeLink(), parent, mode);
-        } else notPresent(file.getRef(), mode, parent);
+        } else alreadyProcessed(file.getRef(), mode, parent);
         LOG.trace("<<< {} {}", mode, file);
     }
 
@@ -136,7 +169,7 @@ public abstract class AbstractClientlibVisitor implements ClientlibVisitor {
         if (isNotProcessed(externalUri.getRef())) {
             action(externalUri, mode, parent);
             markAsProcessed(externalUri.makeLink(), parent, mode);
-        } else notPresent(externalUri.getRef(), mode, parent);
+        } else alreadyProcessed(externalUri.getRef(), mode, parent);
         // never embedded -> irrelevant for hash.
         LOG.trace("<<< {} {}", mode, externalUri);
     }
@@ -152,12 +185,14 @@ public abstract class AbstractClientlibVisitor implements ClientlibVisitor {
 
     /** Hook for additional checks about already processed elements. */
     protected void alreadyProcessed(ClientlibRef ref, VisitorMode mode, ClientlibResourceFolder folder) {
-        // empty here.
+        // That's usually OK if it's included e.g. as a dependency from several places, so just log at trace level.
+        LOG.trace("Already processed: {} referenced from {}", ref, folder);
     }
 
     /** Hook for additional checks about an element referenced but not present. Default: debuglog. */
     protected void notPresent(ClientlibRef ref, VisitorMode mode, ClientlibResourceFolder parent) {
-        LOG.debug("Not present: {} referenced from {}", ref, parent);
+        if (LOG.isDebugEnabled())
+            LOG.debug("Not present: {} {} referenced {} from {}", new Object[]{ref.optional ? " opt. " : " mand. ", ref, mode, parent});
     }
 
     protected void updateHash(String path, Calendar updatetime) {
@@ -183,13 +218,15 @@ public abstract class AbstractClientlibVisitor implements ClientlibVisitor {
         return Base64.encodeBase64URLSafeString(b);
     }
 
-    /** Checks whether something matching this reference has already been
-     * {@link #markAsProcessed(ClientlibLink, ClientlibResourceFolder, VisitorMode)}. */
+    /**
+     * Checks whether something matching this reference has already been
+     * {@link #markAsProcessed(ClientlibLink, ClientlibResourceFolder, VisitorMode)}.
+     */
     protected boolean isNotProcessed(ClientlibRef ref) {
         return !ref.isSatisfiedby(processedElements);
     }
 
-    /** Marks a link processed for current clientlib call (that is, clientlib tag call).   */
+    /** Marks a link processed for current clientlib call (that is, clientlib tag call). */
     protected void markAsProcessed(ClientlibLink link, ClientlibResourceFolder parent, VisitorMode visitorMode) {
         if (processedElements.contains(link)) {
             LOG.error("Bug: processed duplicate clientlib link: {} mode {} from {}",
@@ -209,23 +246,20 @@ public abstract class AbstractClientlibVisitor implements ClientlibVisitor {
     }
 
     /** Optional action to take after visiting the element. Default : empty. */
-    protected void action(ClientlibCategory clientlibCategory, VisitorMode mode, ClientlibResourceFolder parent)
-            throws IOException, RepositoryException {
+    protected void action(ClientlibCategory clientlibCategory, VisitorMode mode, ClientlibResourceFolder parent) {
     }
 
     /** Optional action to take after visiting the element. Default : empty. */
-    protected void action(Clientlib clientlib, VisitorMode mode, ClientlibResourceFolder parent) throws IOException,
-            RepositoryException {
+    protected void action(Clientlib clientlib, VisitorMode mode, ClientlibResourceFolder parent) {
     }
 
     /** Optional action to take after visiting the element. Default : empty. */
-    protected void action(ClientlibResourceFolder folder, VisitorMode mode, ClientlibResourceFolder parent) throws
-            IOException, RepositoryException {
+    protected void action(ClientlibResourceFolder folder, VisitorMode mode, ClientlibResourceFolder parent) {
     }
 
     /** Optional action to take after visiting the element. Default : empty. */
-    protected void action(ClientlibFile file, VisitorMode mode, ClientlibResourceFolder parent) throws
-            RepositoryException, IOException {
+    protected void action(ClientlibFile file, VisitorMode mode, ClientlibResourceFolder parent)
+            throws RepositoryException, IOException {
     }
 
     /** Optional action to take after visiting the element. Default : empty. */

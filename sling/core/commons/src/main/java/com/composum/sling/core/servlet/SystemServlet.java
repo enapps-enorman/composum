@@ -24,6 +24,7 @@ import org.apache.sling.api.resource.ResourceResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nonnull;
 import javax.jcr.Binary;
 import javax.jcr.RepositoryException;
 import javax.servlet.ServletException;
@@ -127,7 +128,7 @@ public class SystemServlet extends AbstractServiceServlet {
     //
 
     /** the general filter for mixin types */
-    public static class MixinTypesFilter implements ResourceFilter {
+    public static class MixinTypesFilter extends ResourceFilter.AbstractResourceFilter {
 
         @Override
         public boolean accept(Resource resource) {
@@ -141,7 +142,7 @@ public class SystemServlet extends AbstractServiceServlet {
         }
 
         @Override
-        public void toString(StringBuilder builder) {
+        public void toString(@Nonnull StringBuilder builder) {
             builder.append("MixinTypes");
         }
     }
@@ -155,7 +156,7 @@ public class SystemServlet extends AbstractServiceServlet {
         }
 
         @Override
-        public void toString(StringBuilder builder) {
+        public void toString(@Nonnull StringBuilder builder) {
             builder.append("PrimaryTypes");
         }
     }

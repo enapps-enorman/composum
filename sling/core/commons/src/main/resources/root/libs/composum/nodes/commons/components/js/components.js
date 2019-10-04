@@ -170,6 +170,21 @@
             },
 
             /**
+             * finalize all date before the following submit (prepare data for storing)
+             */
+            finalize: function () {
+                var c = components.const.form;
+                this.$(widgets.const.css.selector.general).each(function () {
+                    if (this.view) {
+                        if (_.isFunction(this.view.finalize)) {
+                            // prepare each widget independent
+                            this.view.finalize.apply(this.view);
+                        }
+                    }
+                });
+            },
+
+            /**
              * Submit the form of the dialog.
              */
             submitForm: function (onSuccess, onError, onComplete) {
@@ -347,22 +362,22 @@
             },
 
             getValue: function () {
-                return this.$el.val();
+                return this.$input.val();
             },
 
             setValue: function (value, triggerChange) {
-                this.$el.val(value);
+                this.$input.val(value);
                 if (triggerChange) {
                     this.$el.trigger('change');
                 }
             },
 
             reset: function () {
-                this.$el.selectedIndex = -1;
+                this.$input.val(undefined);
             },
 
             setOptions: function (options) {
-                this.$el.html('');
+                this.$input.html('');
                 if (_.isArray(options)) {
                     options.forEach(function (option) {
                         if (_.isObject(option)) {
@@ -378,12 +393,73 @@
         widgets.register('.widget.select-widget', components.SelectWidget);
 
         /**
+         * the behaviour of a table with rows containing a checkbox to implement a multiple selection
+         */
+        components.TableSelectWidget = components.SelectWidget.extend({
+
+            initialize: function (options) {
+                components.SelectWidget.prototype.initialize.apply(this, [options]);
+                this.$items = this.$('tbody tr');
+                this.$items.click(_.bind(this.toggleElement, this));
+                this.$('thead tr input[type="checkbox"]').change(_.bind(this.toggleAll, this));
+            },
+
+            isNotEmpty: function () {
+                return this.$items.length > 0;
+            },
+
+            toggleElement: function (event) {
+                event.preventDefault();
+                var $row = $(event.currentTarget);
+                var $checkbox = $row.find('input[type="checkbox"]');
+                $checkbox.prop('checked', !$checkbox.prop('checked'));
+                return false;
+            },
+
+            toggleAll: function (event) {
+                var $checkbox = $(event.currentTarget);
+                var value = $checkbox.prop('checked');
+                this.$('tbody tr input[type="checkbox"]').prop('checked', value);
+                return false;
+            },
+
+            // SelectWidget
+
+            retrieveInput: function () {
+                return this.$('input[type="checkbox"]');
+            },
+
+            getValue: function () {
+                var value = [];
+                this.$('input[type="checkbox"]:checked').each(_.bind(function (i, el) {
+                    value.push($(el).attr('value'))
+                }, this));
+                return value;
+            },
+
+            setValue: function (value, triggerChange) {
+                if (!_.isArray(value)) {
+                    value = [value];
+                }
+                this.$('input[type="checkbox"]').prop('checked', false);
+                value.forEach(_.bind(function (val) {
+                    this.$('input[type="checkbox"][value="' + val + '"]').prop('checked', true);
+                }, this));
+                if (triggerChange) {
+                    this.$el.trigger('change');
+                }
+            }
+        });
+
+        widgets.register('.widget.table-select-widget', components.TableSelectWidget);
+
+        /**
          * the 'text-field-widget' (window.core.components.TextFieldWidget)
          *
          * this is the basic class ('superclass') of all text input field based widgets; it is also usable
          * as is for normal text input fields; it implements the general validation and reset functions
          * possible attributes:
-         * - data-rules: 'mandatory,unique'
+         * - data-rules: 'required,unique'
          * - data-pattern: a regexp pattern (javascript) as string or in pattern notation (/.../; with flags)
          */
         components.TextFieldWidget = widgets.Widget.extend({
@@ -523,12 +599,19 @@
                 components.TextFieldWidget.prototype.initialize.apply(this, [options]);
                 this.$menu = this.$('.dropdown-menu');
                 this.$menu.find('li a').click(_.bind(this.optionSelected, this));
-                this.$textField.on('change.menu', _.bind(this.initMenu, this));
+                this.$textField.on('change.combobox', _.bind(this.onValueChange, this));
             },
 
-            initMenu: function () {
+            onValueChange: function () {
+                var value = this.getValue();
+                var self = this;
+                this.$('[data-value-class]').each(function () {
+                    var $el = $(this);
+                    var css = $el.data('value-class').replace(/\$/g, value);
+                    $el.removeClass().addClass(css);
+                });
                 this.$menu.find('li').removeClass('active');
-                this.$menu.find('li[data-value="' + this.getValue() + '"]').addClass('active');
+                this.$menu.find('li[data-value="' + value + '"]').addClass('active');
             },
 
             optionSelected: function (event) {
@@ -549,7 +632,7 @@
          * this is the basic class ('superclass') of all text input field based widgets; it is also usable
          * as is for normal text input fields; it implements the general validation and reset functions
          * possible attributes:
-         * - data-rules: 'mandatory'
+         * - data-rules: 'required'
          * - data-pattern: a regexp pattern (javascript) as string or in pattern notation (/.../; with flags)
          */
         components.TextAreaWidget = widgets.Widget.extend({
@@ -648,10 +731,11 @@
                     var path = this.pathWidget.getValue();
                     if (path !== this.lastPathSelected) {
                         if (path.indexOf('/') === 0) {
-                            core.getJson('/bin/cpm/nodes/node.tree.json' + path, _.bind(function (data) {
-                                this.lastPathSelected = data.path;
-                                this.onPathChanged(data.path);
-                            }, this));
+                            core.getJson('/bin/cpm/nodes/node.tree.json' + core.encodePath(path),
+                                _.bind(function (data) {
+                                    this.lastPathSelected = data.path;
+                                    this.onPathChanged(data.path);
+                                }, this));
                         }
                     }
                     this.busy = false;
@@ -755,7 +839,8 @@
              * stores the value for a selected path; extension hook for different path based values
              */
             setPath: function (path) {
-                this.setValue(path);
+                var oldValue = this.getValue();
+                this.setValue(path, oldValue !== path);
             },
 
             getRootPath: function () {
@@ -812,7 +897,7 @@
              * retrieves the referenc for the path and stores this reference as value
              */
             retrieveReference: function (path) {
-                core.getJson('/bin/cpm/nodes/node.tree.json' + path, _.bind(function (data) {
+                core.getJson('/bin/cpm/nodes/node.tree.json' + core.encodePath(path), _.bind(function (data) {
                     this.path = path;
                     this.setValue(data.uuid ? data.uuid : data.id);
                 }, this));
@@ -836,6 +921,7 @@
         /**
          * the 'number-field-widget' (window.core.components.NumberFieldWidget)
          * possible attributes:
+         *   - data-options: '[min][:step[:max[:default]]]'
          */
         components.NumberFieldWidget = components.TextFieldWidget.extend({
 
@@ -847,51 +933,93 @@
                     if (values.length > 0) options.minValue = values[0];
                     if (values.length > 1) options.stepSize = values[1];
                     if (values.length > 2) options.maxValue = values[2];
+                    if (values.length > 3) options.defValue = values[3];
                 }
                 this.minValue = options.minValue ? Number(options.minValue) : undefined;
                 this.stepSize = Number(options.stepSize || 1);
                 this.maxValue = options.maxValue ? Number(options.maxValue) : undefined;
+                this.defValue = options.defValue ? Number(options.defValue) : undefined;
+                this.$('.clear').click(_.bind(this.clear, this));
                 this.$('.increment').click(_.bind(this.increment, this));
                 this.$('.decrement').click(_.bind(this.decrement, this));
+                this.initValue();
                 this.$textField.on('change.number', _.bind(this.onChange, this));
             },
 
-            setValue: function (value, triggerChange) {
-                if (value) {
-                    var val = Number(value);
-                    if (this.minValue !== undefined && val < this.minValue) {
-                        value = this.minValue;
-                    }
-                    if (this.maxValue !== undefined && val > this.maxValue) {
-                        value = this.maxValue;
-                    }
+            initValue: function () {
+                var value = this.getValue();
+                if (value === undefined) {
+                    value = this.defValue !== undefined ? this.defValue : this.blankAllowed() ? undefined
+                        : this.minValue !== undefined ? this.minValue : this.maxValue;
                 }
-                components.TextFieldWidget.prototype.setValue.apply(this, [value, triggerChange]);
+                this.setValue(value);
             },
 
             onChange: function () {
                 this.setValue(this.getValue()); // filter new value for number restrictions
             },
 
+            setValue: function (value, triggerChange) {
+                if (value !== undefined && (value = this.getNumber(value)) !== undefined) {
+                    if (this.minValue !== undefined && value < this.minValue) {
+                        value = this.minValue;
+                    }
+                    if (this.maxValue !== undefined && value > this.maxValue) {
+                        value = this.maxValue;
+                    }
+                }
+                components.TextFieldWidget.prototype.setValue.apply(this, [value !== undefined ? value
+                    : this.blankAllowed() ? undefined : this.defValue, triggerChange]);
+            },
+
+            blankAllowed: function () {
+                return this.rules === undefined || this.rules.blank || this.rules.required !== true
+            },
+
+            getNumber: function (value) {
+                if (value === undefined) {
+                    value = this.getValue();
+                }
+                if (value !== undefined) {
+                    try {
+                        value = parseInt(value);
+                    } catch (ex) {
+                    }
+                    if (isNaN(value)) {
+                        value = undefined;
+                    }
+                }
+                return value;
+            },
+
             increment: function () {
                 if (this.stepSize) {
-                    this.setValue((this.getValue() ? parseInt(this.getValue()) : this.minValue) + this.stepSize, true);
+                    var value = this.getNumber();
+                    this.setValue(value !== undefined ? (value + this.stepSize) : this.minValue, true);
                 }
             },
 
             decrement: function () {
-                if (this.stepSize && this.getValue()) {
-                    this.setValue(parseInt(this.getValue()) - this.stepSize, true);
+                if (this.stepSize) {
+                    var value = this.getNumber();
+                    this.setValue(value !== undefined ? (value - this.stepSize) : this.maxValue, true);
                 }
             },
 
+            clear: function () {
+                this.setValue(undefined, true);
+            },
+
             extValidate: function (value) {
-                var valid = true;
-                if (valid && this.minValue !== undefined) {
-                    valid = (value >= this.minValue);
-                }
-                if (valid && this.maxValue !== undefined) {
-                    valid = (value <= this.maxValue);
+                value = this.getNumber(value);
+                var valid = value !== undefined || this.blankAllowed();
+                if (valid && value !== undefined) {
+                    if (this.minValue !== undefined) {
+                        valid = value >= this.minValue;
+                    }
+                    if (valid && this.maxValue !== undefined) {
+                        valid = value <= this.maxValue;
+                    }
                 }
                 return valid;
             }
@@ -907,10 +1035,16 @@
 
             initialize: function (options) {
                 components.TextFieldWidget.prototype.initialize.apply(this, [options]);
+                this.data = {
+                    locale: this.$el.data('locale') || 'en',
+                    format: this.$el.data('format') || 'YYYY-MM-DD HH:mm:ss',
+                    options: {
+                        weeks: core.toBoolean(this.$el.data('weeks'), true)
+                    }
+                };
                 this.$el.datetimepicker({
-                    locale: 'en',
-                    format: 'YYYY-MM-DD HH:mm:ss',
-                    //format: 'DD.MM.YYYY HH:mm:ss',
+                    locale: this.data.locale,
+                    format: this.data.format,
                     extraFormats: [
                         'YY-MM-DD',
                         'YY-MM-DD HH:mm',
@@ -931,20 +1065,39 @@
                         'DD.MM.YYYY HH:mm',
                         'DD.MM.YYYY HH:mm ZZ',
                         'DD.MM.YYYY HH:mm:ss',
-                        'DD.MM.YYYY HH:mm:ss ZZ'
+                        'DD.MM.YYYY HH:mm:ss ZZ',
+                        'D. MMMM YYYY',
+                        'D. MMMM YYYY HH:mm',
+                        'D. MMMM YYYY HH:mm ZZ',
+                        'D MMM YYYY',
+                        'D MMM YYYY HHmm',
+                        'D MMM YYYY HHmm ZZ',
+                        'D MMM YYYY HH:mm',
+                        'D MMM YYYY HH:mm ZZ',
+                        'MMMM D, YYYY',
+                        'MMMM D, YYYY HHmm',
+                        'MMMM D, YYYY HHmm ZZ',
+                        'MMMM D, YYYY HH:mm',
+                        'MMMM D, YYYY HH:mm ZZ',
+                        'MM/DD/YYYY',
+                        'MM/DD/YYYY HHmm',
+                        'MM/DD/YYYY HHmm ZZ',
+                        'MM/DD/YYYY HH:mm',
+                        'MM/DD/YYYY HH:mm ZZ'
                     ],
-                    calendarWeeks: true,
+                    calendarWeeks: this.data.options.weeks,
                     showTodayButton: true,
                     showClear: true,
                     showClose: true
                 });
+                this.datetimepicker = this.$el.data('DateTimePicker');
             },
 
             /**
              * defines the (initial) value of the input field
              */
             setValue: function (value, triggerChange) {
-                this.$el.data('DateTimePicker').date(value ? new Date(value) : null);
+                this.datetimepicker.date(value ? moment(value, this.data.format) : null);
                 this.validate();
                 if (triggerChange) {
                     this.$el.trigger('change');

@@ -5,275 +5,6 @@
 (function (window) {
     'use strict';
 
-    window.widgets = {
-
-        const: {
-            css: {
-                base: 'widget',
-                selector: {
-                    general: '.widget',
-                    prefix: '.widget.',
-                    form: 'form.form-widget',
-                    group: '.form-group',
-                    label: 'label .label-text'
-                }
-            },
-            attr: {
-                name: 'name'
-            },
-            tag: {
-                input: ['input', 'select', 'textarea']
-            }
-        },
-
-        registered: {},
-
-        /**
-         * Register a widget type by a DOM selector as key for this type.
-         * @param selector    the jQuery selector to find the widgets instances
-         * @param widgetClass the widget implementation class (required)
-         * @param options     additional options (see richtext-widget for example)
-         */
-        register: function (selector, widgetClass, options) {
-            widgets.registered[selector] = _.extend({
-                selector: selector,
-                widgetClass: widgetClass
-            }, options);
-        },
-
-        /**
-         * Set up all components of a DOM element; add a view at each element marked with
-         * a widget css class. Uses the 'core.getView()' function to add the View to the
-         * DOM element itself to avoid multiple View instances for one DOM element.
-         */
-        setUp: function (root) {
-            var $root = root ? $(root) : $(document);
-            _.keys(widgets.registered).forEach(function (selector) {
-                $root.find(selector).each(function () {
-                    var widget = widgets.registered[selector];
-                    core.getView(this, widget.widgetClass);
-                });
-            });
-        },
-
-        /**
-         * applies the abstract 'option' (must be a function) to all widgets which have such
-         * an option registered and are matching to the widgets selector in the 'root's context
-         * used for example
-         *  - by the multi-form-widget to apply the 'afterClone' option after item creation (cloning)
-         */
-        apply: function (root, option) {
-            _.keys(widgets.registered).forEach(function (selector) {
-                var widget = widgets.registered[selector];
-                var method = widget[option];
-                if (_.isFunction(method)) {
-                    var $root = $(root);
-                    if ($root.is(widget.selector)) {
-                        method.apply(root);
-                    } else {
-                        $root.find(widget.selector).each(function () {
-                            method.apply(this);
-                        });
-                    }
-                }
-            });
-        },
-
-        /**
-         *
-         * #abstract
-         */
-        Widget: Backbone.View.extend({
-
-            initialize: function (options) {
-                this.$input = this.retrieveInput();
-                this.name = this.retrieveName();
-                this.form = this.retrieveForm();
-            },
-
-            retrieveInput: function () {
-                var $inputEl = [];
-                for (var i = 0; $inputEl.length === 0 && i < widgets.const.tag.input.length; i++) {
-                    $inputEl = this.$el.is(widgets.const.tag.input[i]) ? this.$el : this.$(widgets.const.tag.input[i]);
-                }
-                return $inputEl;
-            },
-
-            retrieveName: function () {
-                return this.$input.attr(widgets.const.attr.name);
-            },
-
-            retrieveLabel: function () {
-                var c = widgets.const.css.selector;
-                var $label = this.$el.closest(c.group).find(c.label);
-                return $label.length === 1 ? $label.text().trim() : this.retrieveName();
-            },
-
-            declareName: function (name) {
-                if (name) {
-                    this.$input.attr(widgets.const.attr.name, name);
-                } else {
-                    this.$input.removeAttr(widgets.const.attr.name);
-                }
-            },
-
-            retrieveForm: function () {
-                var $form = this.$el.closest(widgets.const.css.selector.form);
-                return $form.length > 0 ? $form[0].view : undefined;
-            },
-
-            /**
-             * #abstract
-             * @returns {undefined}
-             */
-            getValue: function () {
-                return undefined;
-            },
-
-            /**
-             * #abstract
-             */
-            setValue: function (value) {
-            },
-
-            /**
-             * #default
-             */
-            setDefaultValue: function (value) {
-            },
-
-            /**
-             * #abstract
-             */
-            reset: function () {
-            },
-
-            /**
-             * returns the current validation state, calls 'validate' if no state is present
-             */
-            isValid: function (alertMethod) {
-                if (this.valid === undefined) {
-                    this.valid = _.isFunction(this.validate)
-                        ? this.validate(alertMethod)
-                        : true;
-                }
-                this.alertFlush(alertMethod);
-                return this.valid;
-            },
-
-            validationReset: function () {
-                this.valid = undefined;
-                this.alertMessage = undefined;
-            },
-
-            /**
-             * validates the current value using the 'rules' and the 'pattern' if present
-             */
-            validate: function (alertMethod) {
-                this.valid = true;
-                // check only if this field has a 'name' (included in a form) and is visible
-                // prevent from validation check if the 'name' is removed or the class contains 'hidden'
-                if (!this.$el.hasClass('hidden') && this.retrieveName()) {
-                    var value = this.getValue();
-                    if (this.rules) {
-                        var valid;
-                        if (this.valid && this.rules.pattern) {
-                            // check pattern only if not blank (blank is valid if allowed explicitly)
-                            valid = this.valid = (this.rules.blank && (!value || value.trim().length < 1))
-                                || this.rules.pattern.test(value);
-                            if (!valid) {
-                                this.alert(alertMethod, 'danger', '',
-                                    this.rules.patternHint || "value doesn't match pattern", this.rules.pattern);
-                            }
-                        }
-                        if (this.valid && this.rules.mandatory) {
-                            // check for a defined and not blank value
-                            valid = this.valid = (value !== undefined &&
-                                (this.rules.blank || value.trim().length > 0));
-                            if (!valid) {
-                                this.alert(alertMethod, 'danger', '', 'value is mandatory');
-                            }
-                        }
-                    }
-                    // the extension hook for further validation in 'subclasses'
-                    if (this.valid && _.isFunction(this.extValidate)) {
-                        this.valid = this.extValidate(value);
-                    }
-                    if (this.valid) {
-                        this.$el.closest('.form-group').removeClass('has-error');
-                    } else {
-                        this.$el.closest('.form-group').addClass('has-error');
-                    }
-                }
-                return this.valid;
-            },
-
-            initRules: function ($element) {
-                if (!$element) {
-                    $element = this.$el;
-                }
-                this.label = $element.data('label') || this.retrieveLabel();
-                // scan 'data-pattern' attribute
-                var pattern = $element.data('pattern');
-                if (pattern) {
-                    this.rules = _.extend(this.rules || {}, {
-                        pattern: pattern.indexOf('/') === 0
-                            // use '/.../ig' to specify pattern and flags
-                            ? eval(pattern)
-                            // pure strings can not have additional flags...
-                            : new RegExp(pattern)
-                    });
-                    var patternHint = $element.data('pattern-hint');
-                    if (patternHint) {
-                        this.rules.patternHint = patternHint;
-                    }
-                }
-                // scan 'data-rules' attribute
-                var rules = $element.data('rules');
-                if (rules) {
-                    this.rules = _.extend(this.rules || {}, {
-                        mandatory: rules.indexOf('mandatory') >= 0,
-                        blank: rules.indexOf('blank') >= 0,
-                        unique: rules.indexOf('unique') >= 0
-                    });
-                }
-            },
-
-            grabFocus: function () {
-                this.$input.focus();
-            },
-
-            alert: function (alertMethod, type, label, message, hint) {
-                if (_.isFunction(alertMethod)) {
-                    alertMethod(type, label || this.label, message, hint);
-                } else {
-                    this.alertMessage = {
-                        type: type,
-                        label: label,
-                        message: message,
-                        hint: hint
-                    }
-                }
-            },
-
-            /**
-             * print out a probably delayed message
-             */
-            alertFlush: function (alertMethod) {
-                if (_.isFunction(alertMethod) && this.alertMessage) {
-                    alertMethod(this.alertMessage.type, this.alertMessage.label || this.label,
-                        this.alertMessage.message, this.alertMessage.hint);
-                    this.alertMessage = undefined;
-                }
-            }
-        })
-    };
-
-    /**
-     * register the 'hidden' input as a widget to add the widgets behaviour to such hidden values
-     */
-    window.widgets.register('.widget.hidden-widget', window.widgets.Widget);
-
     window.core = {
 
         const: {
@@ -538,10 +269,10 @@
         },
 
         resultMessage: function (result, message) {
-            var hintPattern = new RegExp('<title>(.+)</title>', 'im');
-            var hint = hintPattern.exec(result.responseText);
+            var hint = new RegExp('<title>(.+)</title>', 'im').exec(result.responseText);
+            var exception = new RegExp('<div id="Message">.*Exception: ?(.+)</div>', 'im').exec(result.responseText);
             return (message ? message : '')
-                + (hint ? ((message ? '\n\n' : '') + hint[1])
+                + (hint ? ((message ? ' - ' : '') + hint[1] + (exception ? ' (' + exception[1] + ')' : ''))
                     : ((message ? ' - ' : '') + (result.responseText ? result.responseText
                         : (result.status + ': ' + result.statusText))));
         },
@@ -662,18 +393,33 @@
 
         /**
          * displays a short 'alert' dialog with a single message
-         * @param type the message error level (success, info, warning, danger)
+         * @param typeOrResult the message error level (success, info, warning, danger) or a request result object
          * @param title the message text to display in the heading of the dialog
          * @param message the message text to display; optional - if not present the alert will hide
          * @param result an optional result object from an Ajax call; a hint from this result is added to the text
          */
-        alert: function (type, title, message, result) {
-            type = core.getAlertType(type);
-            var dialog = core.getView('#alert-dialog', core.components.Dialog);
-            dialog.$('.modal-header h4').text(title || 'Alert');
-            dialog.show(_.bind(function () {
-                dialog.alert(type, message, result);
-            }, this));
+        alert: function (typeOrResult, title, message, result) {
+            if (_.isObject(typeOrResult) && _.isObject(typeOrResult.responseJSON) &&
+                typeOrResult.responseJSON.title && _.isArray(typeOrResult.responseJSON.messages)) {
+                // raw xhr object with status as single parameteer
+                core.alert(typeOrResult.responseJSON)
+            } else if (_.isObject(typeOrResult)) { // assuming a status response if 'type' is an object
+                core.messages(typeOrResult.success
+                    ? (typeOrResult.warning ? 'warn' : 'info') : 'danger',
+                    typeOrResult.title, typeOrResult.messages)
+            } else if (_.isObject(result) && result.title && _.isArray(result.messages)) { // status response
+                core.alert(result)
+            } else if (_.isObject(result) && _.isObject(result.responseJSON) &&
+                result.responseJSON.title && _.isArray(result.responseJSON.messages)) { // raw xhr object with status
+                core.alert(result.responseJSON)
+            } else {
+                typeOrResult = core.getAlertType(typeOrResult);
+                var dialog = core.getView('#alert-dialog', core.components.Dialog);
+                dialog.$('.modal-header h4').text(title || 'Alert');
+                dialog.show(_.bind(function () {
+                    dialog.alert(typeOrResult, message, result);
+                }, this));
+            }
         },
 
         /**
@@ -735,11 +481,14 @@
         },
 
         encodePath: function (path) {
-            path = encodeURI(path);
-            path = path.replace('&', '%26');
-            path = path.replace(';', '%3B');
+            path = encodeURI(path); // except: ',/?:@&=+$#' ...
+            path = path.replace('\?', '%3F');
+            path = path.replace('=', '%3D');
             path = path.replace(':', '%3A');
-            path = path.replace('.', '%2E');
+            path = path.replace('\+', '%2B');
+            path = path.replace('&', '%26');
+            path = path.replace('#', '%23');
+            path = path.replace(' ', '%20');
             return path;
         },
 
@@ -774,6 +523,12 @@
 
         endsWith: function (string, snippet) {
             return string.lastIndexOf(snippet) === string.length - snippet.length;
+        },
+
+        toBoolean: function (value, defaultResult) {
+            return value
+                ? !_.contains(['false', 'off', 'no'], value.toLowerCase())
+                : defaultResult ? defaultResult : false;
         }
     };
 
@@ -819,7 +574,7 @@
         }
     });
 
-    window.core.SlingUrl = function (url) {
+    window.core.SlingUrl = function (url, parameters) {
         this.url = url;
         var parts = window.core.const.url.sling.exec(url);
         this.scheme = parts[2];
@@ -835,7 +590,7 @@
         this.selectors = parts[9] ? parts[9].split('.') : [];
         this.extension = parts[10];
         this.suffix = parts[11];
-        this.parameters = {};
+        this.parameters = parameters || {};
         if (parts[13]) {
             var params = parts[13].split("&");
             for (var i = 0; i < params.length; i++) {
@@ -880,7 +635,7 @@
                 this.url += this.path;
             }
             if (_.isArray(this.selectors) && this.selectors.length > 0) {
-                this.url += this.selectors.join('.');
+                this.url += '.' + this.selectors.join('.');
             }
             if (this.extension) {
                 this.url += '.' + this.extension;

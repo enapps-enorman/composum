@@ -1,23 +1,26 @@
 package com.composum.sling.clientlibs.processor;
 
-import com.composum.sling.clientlibs.handle.*;
-import com.composum.sling.clientlibs.service.ClientlibService;
+import com.composum.sling.clientlibs.handle.ClientlibElement;
+import com.composum.sling.clientlibs.handle.ClientlibFile;
+import com.composum.sling.clientlibs.handle.ClientlibLink;
+import com.composum.sling.clientlibs.handle.ClientlibRef;
+import com.composum.sling.clientlibs.handle.ClientlibResourceFolder;
+import com.composum.sling.clientlibs.handle.ClientlibVisitor;
+import com.composum.sling.clientlibs.handle.FileHandle;
 import com.composum.sling.clientlibs.service.ClientlibProcessor;
+import com.composum.sling.clientlibs.service.ClientlibService;
 import org.apache.commons.io.IOUtils;
 import org.apache.sling.api.resource.Resource;
 import org.apache.sling.api.resource.ResourceResolver;
 import org.slf4j.Logger;
 
-import javax.jcr.RepositoryException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.util.ArrayList;
 import java.util.LinkedHashSet;
-import java.util.List;
 
+import static com.composum.sling.clientlibs.handle.ClientlibVisitor.VisitorMode.EMBEDDED;
 import static org.slf4j.LoggerFactory.getLogger;
-import static com.composum.sling.clientlibs.handle.ClientlibVisitor.VisitorMode.*;
 
 /**
  * Appends all embedded files to an input stream.
@@ -52,8 +55,11 @@ public class ProcessingVisitor extends AbstractClientlibVisitor {
     }
 
     @Override
-    public void action(ClientlibFile clientlibFile, VisitorMode mode, ClientlibResourceFolder parent) throws RepositoryException, IOException {
+    public void action(ClientlibFile clientlibFile, VisitorMode mode, ClientlibResourceFolder parent)
+            throws IOException {
         if (EMBEDDED != mode) return;
+        LOG.trace("Processing {} with {}", clientlibFile, processor);
+        long begin = System.currentTimeMillis();
         Resource resource = clientlibFile.handle.getResource();
         if (context.useMinifiedFiles()) {
             resource = service.getMinifiedSibling(resource);
@@ -75,6 +81,9 @@ public class ProcessingVisitor extends AbstractClientlibVisitor {
         } else {
             logNotAvailable(resource, "[content]", parent.getOptional());
         }
+        float time = 0.001f * (System.currentTimeMillis() - begin);
+        LOG.trace("Processed {} in {} s", clientlibFile, time);
+        if (time > 0.1) { LOG.info("Large processing time: {} in {} s", clientlibFile, time); }
     }
 
     protected void logNotAvailable(Resource resource, String reference, boolean optional) {
@@ -87,7 +96,7 @@ public class ProcessingVisitor extends AbstractClientlibVisitor {
     @Override
     protected void alreadyProcessed(ClientlibRef ref, VisitorMode mode, ClientlibResourceFolder folder) {
         if (mode == EMBEDDED) {
-            LOG.warn("Trying to embed already embedded / dependency {} again at {}", ref, folder);
+            LOG.warn("Trying to embed already embedded / dependency {} again at {} from {}", new Object[]{ref, folder, owner});
         }
     }
 

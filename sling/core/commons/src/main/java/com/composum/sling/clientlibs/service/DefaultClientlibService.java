@@ -1,33 +1,94 @@
 package com.composum.sling.clientlibs.service;
 
-import com.composum.sling.clientlibs.handle.*;
-import com.composum.sling.clientlibs.processor.*;
+import com.composum.sling.clientlibs.handle.Clientlib;
+import com.composum.sling.clientlibs.handle.ClientlibCategory;
+import com.composum.sling.clientlibs.handle.ClientlibElement;
+import com.composum.sling.clientlibs.handle.ClientlibExternalUri;
+import com.composum.sling.clientlibs.handle.ClientlibFile;
+import com.composum.sling.clientlibs.handle.ClientlibLink;
+import com.composum.sling.clientlibs.handle.ClientlibRef;
+import com.composum.sling.clientlibs.handle.ClientlibResourceFolder;
+import com.composum.sling.clientlibs.handle.FileHandle;
+import com.composum.sling.clientlibs.processor.CssProcessor;
+import com.composum.sling.clientlibs.processor.CssUrlMapper;
+import com.composum.sling.clientlibs.processor.GzipProcessor;
+import com.composum.sling.clientlibs.processor.JavascriptProcessor;
+import com.composum.sling.clientlibs.processor.LinkRenderer;
+import com.composum.sling.clientlibs.processor.ProcessingVisitor;
+import com.composum.sling.clientlibs.processor.ProcessorContext;
+import com.composum.sling.clientlibs.processor.ProcessorPipeline;
+import com.composum.sling.clientlibs.processor.RendererContext;
+import com.composum.sling.clientlibs.processor.UpdateTimeVisitor;
 import com.composum.sling.core.ResourceHandle;
 import com.composum.sling.core.concurrent.LazyCreationService;
 import com.composum.sling.core.concurrent.SequencerService;
+import com.composum.sling.core.filter.ResourceFilter;
 import com.composum.sling.core.util.ResourceUtil;
+import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.collections.map.LRUMap;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.tuple.Pair;
-import org.apache.felix.scr.annotations.*;
+import org.apache.felix.scr.annotations.Activate;
+import org.apache.felix.scr.annotations.Component;
+import org.apache.felix.scr.annotations.Deactivate;
+import org.apache.felix.scr.annotations.Modified;
+import org.apache.felix.scr.annotations.Reference;
+import org.apache.felix.scr.annotations.ReferenceCardinality;
+import org.apache.felix.scr.annotations.ReferencePolicy;
+import org.apache.felix.scr.annotations.Service;
 import org.apache.sling.api.SlingException;
 import org.apache.sling.api.SlingHttpServletRequest;
-import org.apache.sling.api.resource.*;
+import org.apache.sling.api.resource.LoginException;
+import org.apache.sling.api.resource.ModifiableValueMap;
+import org.apache.sling.api.resource.PersistenceException;
+import org.apache.sling.api.resource.Resource;
+import org.apache.sling.api.resource.ResourceResolver;
+import org.apache.sling.api.resource.ResourceResolverFactory;
+import org.apache.sling.api.resource.ValueMap;
 import org.osgi.service.component.ComponentContext;
 import org.slf4j.Logger;
 
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import javax.jcr.Node;
 import javax.jcr.RepositoryException;
 import javax.jcr.Session;
 import javax.jcr.query.Query;
-import java.io.*;
-import java.util.*;
-import java.util.concurrent.*;
+import java.io.ByteArrayInputStream;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.PipedInputStream;
+import java.io.PipedOutputStream;
+import java.io.Writer;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Calendar;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import static com.composum.sling.clientlibs.handle.Clientlib.*;
+import static com.composum.sling.clientlibs.handle.Clientlib.PROP_CATEGORY;
+import static com.composum.sling.clientlibs.handle.Clientlib.PROP_ORDER;
+import static com.composum.sling.clientlibs.handle.Clientlib.RESOURCE_TYPE;
+import static com.composum.sling.clientlibs.handle.Clientlib.Type;
 import static com.composum.sling.core.util.ResourceUtil.PROP_RESOURCE_TYPE;
 import static com.composum.sling.core.util.ResourceUtil.TYPE_SLING_FOLDER;
 import static org.slf4j.LoggerFactory.getLogger;
@@ -48,9 +109,12 @@ public class DefaultClientlibService implements ClientlibService {
      * Property at content node of cache files that contains the hash value usable as etag that determines the
      * current content of the client library and changes on each added / updated file.
      */
-    public static final String PROP_HASH = ResourceUtil.PROP_DESCRIPTION; // TODO abused for now
+    public static final String PROP_HASH = ResourceUtil.PROP_DESCRIPTION;
 
     public static final Map<String, Object> CRUD_CACHE_FOLDER_PROPS;
+
+    /** Top node for the category cache within the {@link ClientlibConfiguration#getCacheRoot()}. */
+    protected static final String CATEGORYCACHE = "categorycache";
 
     static {
         CRUD_CACHE_FOLDER_PROPS = new HashMap<>();
@@ -84,6 +148,12 @@ public class DefaultClientlibService implements ClientlibService {
     @Reference
     protected GzipProcessor gzipProcessor;
 
+    @Reference(referenceInterface = ClientlibPermissionPlugin.class,
+            cardinality = ReferenceCardinality.OPTIONAL_MULTIPLE, policy = ReferencePolicy.DYNAMIC,
+            bind = "bindPermissionPlugin", unbind = "unbindPermissionPlugin"
+    )
+    protected final List<ClientlibPermissionPlugin> permissionPlugins = new CopyOnWriteArrayList<>();
+
     protected ThreadPoolExecutor executorService = null;
 
     protected EnumMap<Clientlib.Type, ClientlibRenderer> rendererMap;
@@ -95,6 +165,16 @@ public class DefaultClientlibService implements ClientlibService {
      * DOS attack by retrieving random categories.
      */
     protected final LRUMap /*String, Pair<Long, List<String>>*/ categoryToPathCache = new LRUMap(100);
+
+    protected synchronized void bindPermissionPlugin(ClientlibPermissionPlugin permissionPlugin) {
+        permissionPlugins.add(permissionPlugin);
+        categoryToPathCache.clear();
+    }
+
+    protected synchronized void unbindPermissionPlugin(ClientlibPermissionPlugin permissionPlugin) {
+        permissionPlugins.remove(permissionPlugin);
+        categoryToPathCache.clear();
+    }
 
     @Modified
     @Activate
@@ -154,7 +234,9 @@ public class DefaultClientlibService implements ClientlibService {
         return null;
     }
 
-    /** For files we use the correct sibling wrt. {@link ClientlibConfiguration#getUseMinifiedFiles()}. */
+    /**
+     * For files we use the correct sibling wrt. {@link ClientlibConfiguration#getUseMinifiedFiles()}.
+     */
     protected Resource minificationVariant(Resource resource) {
         if (getClientlibConfig().getUseMinifiedFiles()) {
             return getMinifiedSibling(resource);
@@ -162,7 +244,9 @@ public class DefaultClientlibService implements ClientlibService {
         return resource;
     }
 
-    /** Retrieve a resource from a resolver; if we don't find it, we try to retrieve the (un)minified sibling. */
+    /**
+     * Retrieve a resource from a resolver; if we don't find it, we try to retrieve the (un)minified sibling.
+     */
     protected Resource retrieveResource(String path, ResourceResolver resolver) {
         Resource pathResource = retrieveResourceRaw(path, resolver);
         if (null == pathResource) {
@@ -219,7 +303,8 @@ public class DefaultClientlibService implements ClientlibService {
     }
 
     @Override
-    public Resource getMinifiedSibling(Resource resource) {
+    @Nonnull
+    public Resource getMinifiedSibling(@Nonnull Resource resource) {
         String path = resource.getPath();
         String minifiedPath = getMinifiedSibling(path);
         if (!path.equals(minifiedPath)) {
@@ -279,6 +364,7 @@ public class DefaultClientlibService implements ClientlibService {
     protected List<Resource> retrieveResourcesForCategoryUncached(String category, ResourceResolver resolver) {
         List<Resource> resources = new ArrayList<>();
         Set<String> foundlibs = new HashSet<>();
+        List<ResourceFilter> permissionFilters = getCategoryPermissionFilters(category);
         for (String searchPathElement : resolver.getSearchPath()) {
             String xpath = "/jcr:root" + searchPathElement.replaceFirst("/+$", "") + "//element(*," +
                     TYPE_SLING_FOLDER + ")" + "[@" + PROP_RESOURCE_TYPE + "='" + RESOURCE_TYPE + "'" + " and @" +
@@ -288,14 +374,35 @@ public class DefaultClientlibService implements ClientlibService {
                 ResourceHandle handle = ResourceHandle.use(foundResource);
                 String libPath = handle.getPath();
                 String key = libPath.substring(libPath.indexOf(searchPathElement) + searchPathElement.length());
-                if (!foundlibs.contains(key)) { // first wins - e.g. /apps shadows /libs
+                if (!foundlibs.contains(key) && isClientlibPermitted(permissionFilters, handle)) { // first wins - e.g. /apps shadows /libs
                     foundlibs.add(key);
-                    resources.add(foundResource);
+                    resources.add(handle);
                 }
             }
         }
         Collections.sort(resources, orderResourceComparator);
         return resources;
+    }
+
+    /** Retrieves the {@link ResourceFilter}s for a category from all {@link ClientlibPermissionPlugin}s. */
+    @Nonnull
+    protected List<ResourceFilter> getCategoryPermissionFilters(String category) {
+        List<ResourceFilter> result = new ArrayList<>();
+        if (permissionPlugins != null) {
+            for (ClientlibPermissionPlugin plugin : permissionPlugins) {
+                result.add(plugin.categoryFilter(category));
+            }
+        }
+        return result;
+    }
+
+    /** Checks whether a clientlib matches all {@link ResourceFilter}s for the given category. */
+    protected boolean isClientlibPermitted(@Nonnull List<ResourceFilter> filters, Resource clientlibResource) {
+        boolean permitted = true;
+        for (ResourceFilter filter : filters) {
+            permitted = permitted && filter.accept(clientlibResource);
+        }
+        return permitted;
     }
 
     /**
@@ -385,11 +492,21 @@ public class DefaultClientlibService implements ClientlibService {
                 }
                 element = resolve(clientlibRef, adminResolver);
 
-                UpdateTimeVisitor updateTimeVisitor = new UpdateTimeVisitor(element, this, request
-                        .getResourceResolver());
+                UpdateTimeVisitor updateTimeVisitor = new UpdateTimeVisitor(element, this, adminResolver);
                 updateTimeVisitor.execute();
                 final String hash = updateTimeVisitor.getHash();
                 String cacheFileHash = cacheFile.getContent().getProperty(PROP_HASH);
+
+                if (!StringUtils.equals(requestedHash, hash)) {
+                    // safety check to make sure continual up to date checks because of wrong permissions get noticed
+                    UpdateTimeVisitor updateTimeVisitorAsUser = new UpdateTimeVisitor(element, this, request.getResourceResolver());
+                    updateTimeVisitorAsUser.execute();
+                    if (!StringUtils.equals(hash, updateTimeVisitorAsUser.getHash())) {
+                        LOG.error("Clientlib hash for {} as {} and admin disagree - " +
+                                        "likely a permission problem that results in performance problems",
+                                request.getUserPrincipal(), clientlibRef);
+                    }
+                }
 
                 boolean refreshNeeded = refreshForced || !hash.equals(cacheFileHash);
                 // if the clientlib seems newer than the clientlib last modified, we rather regenerate things, too.
@@ -491,7 +608,9 @@ public class DefaultClientlibService implements ClientlibService {
         };
     }
 
-    /** Starts the processing (generation of the embedded content) of the clientlib / -category in the background. */
+    /**
+     * Starts the processing (generation of the embedded content) of the clientlib / -category in the background.
+     */
     protected Future<Void> startProcessing(final ClientlibRef clientlibRef, String encoding,
                                            final ProcessorContext context, final OutputStream outputStream)
             throws IOException {
@@ -565,7 +684,7 @@ public class DefaultClientlibService implements ClientlibService {
     protected String getCachePath(ClientlibRef ref, boolean minified, String encoding) {
         String cacheRoot = clientlibConfig.getCacheRoot();
         String cacheKey;
-        cacheKey = ref.isCategory() ? "/categorycache/" + ref.category : ref.path;
+        cacheKey = ref.isCategory() ? "/" + CATEGORYCACHE + "/" + ref.category : ref.path;
         if (StringUtils.isNotBlank(encoding)) {
             cacheKey += '.' + encoding.trim();
         }
@@ -581,12 +700,196 @@ public class DefaultClientlibService implements ClientlibService {
         return encoding;
     }
 
-    /** Resets unmodified resources to the currently saved state. */
+    /**
+     * Resets unmodified resources to the currently saved state.
+     */
     protected void refreshSession(ResourceResolver resolver, boolean logwarning) {
         try {
             resolver.adaptTo(Session.class).refresh(true);
         } catch (RepositoryException rex) {
             if (logwarning) LOG.warn(rex.getMessage(), rex);
+        }
+    }
+
+    /**
+     * XPath Query that matches all clientlibs.
+     */
+    protected static final String QUERY_CLIENTLIBS = "/jcr:root/(apps|libs)//*[sling:resourceType='composum/nodes/commons/clientlib']";
+
+    /**
+     * Xpath Query suffix for a query that matches all clientlib folders referencing other stuff: {@value #QUERY_SUFFIX_REFERENCERS}.
+     */
+    protected static final String QUERY_SUFFIX_REFERENCERS = "[embed or depends]";
+
+    @Override
+    @Nullable
+    public String verifyClientlibPermissions(@Nullable Clientlib.Type requestedType, @Nullable ResourceResolver userResolver, boolean onlyErrors) {
+        String querySuffix = requestedType != null ? "/" + requestedType.name() + "//*" : "//*";
+        String onlyClientlibQuerySuffix = requestedType != null ? "/" + requestedType.name() + "/.." : "";
+
+        StringBuilder buf = new StringBuilder();
+        ResourceResolver impersonationResolver = userResolver;
+        ResourceResolver administrativeResolver = null;
+        try {
+            if (impersonationResolver == null)
+                impersonationResolver = resolverFactory.getResourceResolver(null);
+            administrativeResolver = createAdministrativeResolver();
+            List<String> unreachablePaths = new ArrayList<>();
+            Iterator<Resource> it = administrativeResolver.findResources(QUERY_CLIENTLIBS + onlyClientlibQuerySuffix + " order by path", Query.XPATH);
+
+            // Check clientlibraries themselves and their categories
+            Set<String> categoriesWithReachableClientlibs = new HashSet<>();
+            Set<String> categoriesWithUnreachableClientlibs = new HashSet<>();
+            Set<String> allCategories = new HashSet<>();
+            while (it.hasNext()) {
+                Resource clientlibElement = it.next();
+                List<String> categories = Arrays.asList(ResourceHandle.use(clientlibElement).getProperty(PROP_CATEGORY, new String[0]));
+                allCategories.addAll(categories);
+                if (impersonationResolver.getResource(clientlibElement.getPath()) == null) {
+                    unreachablePaths.add(clientlibElement.getPath());
+                    categoriesWithUnreachableClientlibs.addAll(categories);
+                } else {
+                    categoriesWithReachableClientlibs.addAll(categories);
+                }
+            }
+            Collection troubledCategories = CollectionUtils.intersection(categoriesWithReachableClientlibs, categoriesWithUnreachableClientlibs);
+            if (!troubledCategories.isEmpty())
+                buf.append("ERROR: Categories with both readable AND unreadable elements: ").append(troubledCategories).append("\n");
+
+            // look for unreadable elements of readable client libraries -> error
+            it = administrativeResolver.findResources(QUERY_CLIENTLIBS + querySuffix + " order by path", Query.XPATH);
+            while (it.hasNext()) {
+                Resource clientlibElement = it.next();
+                if (impersonationResolver.getResource(clientlibElement.getPath()) == null) {
+                    if (!isReachableFrom(unreachablePaths, clientlibElement.getPath())) {
+                        // clientlibs are already there -> this element is surprisingly unreadable.
+                        buf.append("ERROR: unreadable element of readable client library: ")
+                                .append(clientlibElement.getPath()).append("\n");
+                    }
+                    unreachablePaths.add(clientlibElement.getPath());
+                }
+            }
+            unreachablePaths = removeChildren(unreachablePaths);
+            if (!onlyErrors && !unreachablePaths.isEmpty())
+                buf.insert(0, "INFO: Unreadable for this user: " + unreachablePaths + "\n");
+
+            // look for unreadable references of readable elements
+            it = administrativeResolver.findResources(QUERY_CLIENTLIBS + querySuffix + QUERY_SUFFIX_REFERENCERS + " order by path", Query.XPATH);
+            while (it.hasNext()) {
+                Resource clientlibElement = it.next();
+                if (isReachableFrom(unreachablePaths, clientlibElement.getPath()))
+                    continue;
+                Resource clientlibFolderResource = clientlibElement;
+                while (!clientlibFolderResource.getParent().isResourceType(RESOURCE_TYPE)) {
+                    clientlibFolderResource = clientlibFolderResource.getParent();
+                }
+                Type type = null;
+                try {
+                    type = Type.valueOf(clientlibFolderResource.getName());
+                } catch (IllegalArgumentException e) { // very unusual case - folder name other than type?
+                    buf.append("WARN: Cannot recognize type of ").append(clientlibElement.getPath()).append("\n");
+                }
+                if (type != null) {
+                    ClientlibResourceFolder resourceFolder = new ClientlibResourceFolder(type, clientlibElement);
+                    for (ClientlibRef ref : resourceFolder.getDependencies()) {
+                        verifyRef(resourceFolder, ref, administrativeResolver, impersonationResolver, allCategories, buf);
+                    }
+                    for (ClientlibRef ref : resourceFolder.getEmbedded()) {
+                        verifyRef(resourceFolder, ref, administrativeResolver, impersonationResolver, allCategories, buf);
+                    }
+                    for (ClientlibRef ref : (Collection<ClientlibRef>) CollectionUtils.intersection(resourceFolder.getDependencies(), resourceFolder.getEmbedded())) {
+                        buf.append("ERROR: both a dependency and embedded: ").append(ref).append(" in ").append(resourceFolder).append("\n");
+                    }
+                }
+            }
+        } catch (LoginException e) {
+            buf.append("Cannot create anonymous or administrative resolver - " + e);
+            LOG.error("Cannot create anonymous or administrative resolver - " + e, e);
+        } catch (Exception e) {
+            LOG.error("Error checking clientlibs", e);
+        } finally {
+            if (null != administrativeResolver) administrativeResolver.close();
+            if (userResolver == null && null != impersonationResolver)
+                impersonationResolver.close(); // else it's just resolver coming from outside
+        }
+        return buf.length() == 0 ? null : buf.toString();
+    }
+
+    @Override
+    public void clearCache(ResourceResolver resolver) throws PersistenceException {
+        LOG.info("Clear cache requested.");
+        String cacheRootPath = clientlibConfig.getCacheRoot();
+        Resource cacheRoot = resolver.getResource(cacheRootPath);
+        List<String> subpaths = new ArrayList<>();
+        subpaths.addAll(Arrays.asList(resolver.getSearchPath()));
+        subpaths.add(CATEGORYCACHE);
+        for (String child : subpaths) {
+            Resource childResource = cacheRoot.getChild(StringUtils.removeStart(child, "/"));
+            if (childResource != null) {
+                if (StringUtils.countMatches(childResource.getPath(), "/") < 3) // safety check
+                    throw new IllegalArgumentException("Suspicious path for clientlib cache to delete: " + childResource.getPath());
+                LOG.info("Deleting {}", childResource.getPath());
+                resolver.delete(childResource);
+            }
+        }
+    }
+
+    /** For each path contained here, remove all paths that are children of it, thus removing consequential errors. */
+    protected List<String> removeChildren(List<String> unreachablePaths) {
+        Collections.sort(unreachablePaths); // ancestors appear before children
+        List<String> result = new ArrayList<>();
+        for (String path : unreachablePaths) {
+            if (!isReachableFrom(result, path))
+                result.add(path);
+        }
+        return result;
+    }
+
+    protected boolean isReachableFrom(List<String> paths, String path) {
+        for (String ancestorPath : paths)
+            if (isAncestorOrSelf(ancestorPath, path))
+                return true;
+        return false;
+    }
+
+    /** Returns true if the parent is an {ancestor} of the {resource} (and both are not null, of course. */
+    protected boolean isAncestorOrSelf(@Nullable String parentPath, @Nullable String childPath) {
+        return parentPath != null && childPath != null && (
+                parentPath.equals(childPath) ||
+                        childPath.startsWith(parentPath + "/")
+        );
+    }
+
+    private void verifyRef(ClientlibResourceFolder resourceFolder, ClientlibRef ref, ResourceResolver administrativeResolver, ResourceResolver userResolver, Set<String> allCategories, StringBuilder buf) {
+        if (ref.isExternalUri()) return;
+        if (ref.isCategory()) {
+            if (!allCategories.contains(ref.category)) {
+                if (ref.optional)
+                    buf.append("INFO: empty optional category ").append(ref).append(" referenced\n");
+                else
+                    buf.append("WARN: empty mandatory category ").append(ref).append(" referenced\n");
+            }
+            return;
+        }
+        Resource resourceAsAdmin = retrieveResource(ref.path, administrativeResolver);
+        if (resourceAsAdmin != null) {
+            Resource resourceAsUser = retrieveResource(ref.path, userResolver);
+            if (resourceAsUser == null) {
+                buf.append("ERROR: unreadable reference ").append(resourceAsAdmin.getPath())
+                        .append(" of readable client library resource folder ").append(resourceFolder.resource.getPath())
+                        .append("\n");
+            } else if (!resourceAsAdmin.getPath().equals(resourceAsUser.getPath())) {
+                buf.append("ERROR: Permission problem: resource different for admin and anonymous for ")
+                        .append(ref.toString())
+                        .append(" : ").append(resourceAsAdmin.getPath())
+                        .append(" vs. ").append(resourceAsUser.getPath())
+                        .append("\n");
+            } else if (new FileHandle(resourceAsAdmin).isValid() && !new FileHandle(resourceAsUser).isValid()) {
+                buf.append("ERROR: Content resource not readable: ").append(resourceAsAdmin.getPath()).append("\n");
+            }
+        } else if (!resourceFolder.getOptional()) {
+            buf.append("ERROR: can't find element ").append(ref.path)
+                    .append(" of resource folder ").append(resourceFolder.resource.getPath()).append("\n");
         }
     }
 

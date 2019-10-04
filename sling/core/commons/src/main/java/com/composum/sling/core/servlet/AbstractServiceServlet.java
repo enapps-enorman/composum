@@ -2,9 +2,9 @@ package com.composum.sling.core.servlet;
 
 import com.composum.sling.core.ResourceHandle;
 import com.composum.sling.core.mapping.MappingRules;
+import com.composum.sling.core.util.I18N;
 import com.composum.sling.core.util.JsonUtil;
 import com.composum.sling.core.util.ResponseUtil;
-import com.composum.sling.cpnl.CpnlElFunctions;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.InstanceCreator;
@@ -24,6 +24,10 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.Reader;
 import java.io.StringReader;
+import java.text.SimpleDateFormat;
+import java.util.Calendar;
+import java.util.Iterator;
+import java.util.Map;
 
 /**
  * A basic class for all '/bin/{service}/path/to/resource' servlets.
@@ -49,6 +53,8 @@ public abstract class AbstractServiceServlet extends SlingAllMethodsServlet {
     public static final String PARAM_URL = "url";
     public static final String PARAM_VALUE = "value";
     public static final String PARAM_VERSION = "version";
+
+    public static final String DATE_FORMAT = "yyyy-MM-DD HH:mm:ss";
 
     protected abstract boolean isEnabled();
 
@@ -135,8 +141,7 @@ public abstract class AbstractServiceServlet extends SlingAllMethodsServlet {
     public static ResourceHandle getResource(SlingHttpServletRequest request) {
         ResourceResolver resolver = request.getResourceResolver();
         String path = getPath(request);
-        ResourceHandle resource = ResourceHandle.use(resolver.resolve(path));
-        return resource;
+        return ResourceHandle.use(resolver.resolve(path));
     }
 
     public static String getPath(SlingHttpServletRequest request) {
@@ -158,28 +163,73 @@ public abstract class AbstractServiceServlet extends SlingAllMethodsServlet {
         JsonWriter jsonWriter = ResponseUtil.getJsonWriter(response);
         jsonWriter.beginObject();
         jsonWriter.name("success").value(false);
-        jsonWriter.name("response").beginObject();
+        jsonWriter.name("messages").beginArray();
+        jsonWriter.beginObject();
         jsonWriter.name("level").value("warn");
-        jsonWriter.name("text").value(CpnlElFunctions.i18n(request,
+        jsonWriter.name("text").value(I18N.get(request,
                 "An element with the same name exists already - use a different name!"));
         jsonWriter.endObject();
+        jsonWriter.endArray();
         jsonWriter.endObject();
+    }
+
+    //
+    // JSON answer helpers
+    //
+
+    public static void jsonValue(JsonWriter writer, Object value) throws IOException {
+        if (value instanceof String) {
+            writer.value((String) value);
+        } else if (value instanceof Map) {
+            Map map = (Map) value;
+            writer.beginObject();
+            for (Object key : map.keySet()) {
+                writer.name(key.toString());
+                jsonValue(writer, map.get(key));
+            }
+            writer.endObject();
+        } else if (value instanceof Object[]) {
+            writer.beginArray();
+            for (Object v : (Object[]) value) {
+                jsonValue(writer, v);
+            }
+            writer.endArray();
+        } else if (value instanceof Iterable) {
+            writer.beginArray();
+            for (Object v : (Iterable) value) {
+                jsonValue(writer, v);
+            }
+            writer.endArray();
+        } else if (value instanceof Iterator) {
+            Iterator iterator = (Iterator) value;
+            writer.beginArray();
+            while (iterator.hasNext()) {
+                jsonValue(writer, iterator.next());
+            }
+            writer.endArray();
+        } else if (value instanceof Calendar) {
+            writer.value(new SimpleDateFormat(DATE_FORMAT).format(((Calendar) value).getTime()));
+        } else {
+            writer.value(value != null ? value.toString() : null);
+        }
     }
 
     //
     // JSON parameters parsing
     //
 
-    public static <T> T getJsonObject(SlingHttpServletRequest request, Class<T> type) throws IOException {
+    public static <T> T getJsonObject(SlingHttpServletRequest request, Class<T> type)
+            throws IOException {
         InputStream inputStream = request.getInputStream();
         Reader inputReader = new InputStreamReader(inputStream, MappingRules.CHARSET.name());
         // parse JSON input into a POJO of the requested type
         Gson gson = JsonUtil.GSON_BUILDER.create();
-        T object = gson.fromJson(inputReader, type);
-        return object;
+        return gson.fromJson(inputReader, type);
     }
 
-    public static <T> T getJsonObject(SlingHttpServletRequest request, Class<T> type, InstanceCreator<T> instanceCreator) throws IOException {
+    public static <T> T getJsonObject(SlingHttpServletRequest request, Class<T> type,
+                                      InstanceCreator<T> instanceCreator)
+            throws IOException {
         InputStream inputStream = request.getInputStream();
         Reader inputReader = new InputStreamReader(inputStream, MappingRules.CHARSET.name());
         // parse JSON input into a POJO of the requested type
@@ -187,11 +237,10 @@ public abstract class AbstractServiceServlet extends SlingAllMethodsServlet {
         return gson.fromJson(inputReader, type);
     }
 
-    public static <T> T getJsonObject(String input, Class<T> type) throws IOException {
+    public static <T> T getJsonObject(String input, Class<T> type) {
         Reader inputReader = new StringReader(input);
         // parse JSON input into a POJO of the requested type
         Gson gson = JsonUtil.GSON_BUILDER.create();
-        T object = gson.fromJson(inputReader, type);
-        return object;
+        return gson.fromJson(inputReader, type);
     }
 }

@@ -2,6 +2,8 @@ package com.composum.sling.cpnl;
 
 import com.composum.sling.core.BeanContext;
 import com.composum.sling.core.SlingBean;
+import com.composum.sling.core.bean.BeanFactory;
+import com.composum.sling.core.bean.SlingBeanFactory;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.sling.api.resource.Resource;
 import org.osgi.framework.InvalidSyntaxException;
@@ -32,7 +34,7 @@ public class ComponentTag extends CpnlBodyTagSupport {
 
     protected SlingBean component;
     private transient Class<? extends SlingBean> componentType;
-    private static Map<Class<? extends SlingBean>, Field[]> fieldCache = new ConcurrentHashMap<Class<? extends SlingBean>, Field[]>();
+    private static final Map<Class<? extends SlingBean>, Field[]> fieldCache = new ConcurrentHashMap<>();
 
     protected ArrayList<Map<String, Object>> replacedAttributes;
     public static final Map<String, Integer> SCOPES = new HashMap<>();
@@ -70,6 +72,8 @@ public class ComponentTag extends CpnlBodyTagSupport {
                 LOG.error("Could not access: " + this.type, ex);
             } catch (InstantiationException ex) {
                 LOG.error("Could not instantiate: " + this.type, ex);
+            } catch (IllegalArgumentException ex) {
+                LOG.error("Could not adapt to: " + this.type, ex);
             }
         }
         return EVAL_BODY_INCLUDE;
@@ -86,6 +90,7 @@ public class ComponentTag extends CpnlBodyTagSupport {
     /**
      * Configure an var / variable name to store the component in the context
      */
+    @Override
     public void setId(String id) {
         setVar(id);
     }
@@ -117,8 +122,7 @@ public class ComponentTag extends CpnlBodyTagSupport {
      * for the component instance attribute
      */
     public void setScope(String key) {
-        Integer value = key != null ? SCOPES.get(key.toLowerCase()) : null;
-        varScope = value != null ? value : null;
+        varScope = key != null ? SCOPES.get(key.toLowerCase()) : null;
     }
 
     public void setVarScope(Integer value) {
@@ -147,6 +151,7 @@ public class ComponentTag extends CpnlBodyTagSupport {
     /**
      * get the content type class object
      */
+    @SuppressWarnings("unchecked")
     protected Class<? extends SlingBean> getComponentType() throws ClassNotFoundException {
         if (componentType == null) {
             String type = getType();
@@ -182,8 +187,19 @@ public class ComponentTag extends CpnlBodyTagSupport {
         SlingBean component = null;
         Class<? extends SlingBean> type = getComponentType();
         if (type != null) {
-            BeanContext baseContext = context.withResource(getModelResource(context));
+            BeanFactory factoryRule = type.getAnnotation(BeanFactory.class);
+            Resource modelResource = getModelResource(context);
+            if (factoryRule != null) {
+                SlingBeanFactory factory = context.getService(factoryRule.serviceClass());
+                if (factory != null) {
+                    return factory.createBean(context, modelResource, type);
+                }
+            }
+            BeanContext baseContext = context.withResource(modelResource);
             component = baseContext.adaptTo(type);
+            if (component == null) {
+                throw new IllegalArgumentException("Could not adapt " + modelResource + " to " + type);
+            }
             injectServices(component);
             additionalInitialization(component);
         }

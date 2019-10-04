@@ -11,24 +11,33 @@ import org.apache.sling.api.request.RequestPathInfo;
 import org.apache.sling.api.resource.Resource;
 import org.apache.sling.api.servlets.SlingSafeMethodsServlet;
 import org.osgi.framework.BundleContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.servlet.RequestDispatcher;
 import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import static com.composum.sling.core.util.LinkUtil.EXT_HTML;
 
 /**
  * A base class for a general hook (servlet) for a console view.
  */
 public abstract class AbstractConsoleServlet extends SlingSafeMethodsServlet {
 
+    private static final Logger LOG = LoggerFactory.getLogger(AbstractConsoleServlet.class);
+
     protected BundleContext bundleContext;
 
     @Activate
-    private void activate(final BundleContext bundleContext) {
+    public void activate(final BundleContext bundleContext) {
         this.bundleContext = bundleContext;
     }
+
+    protected abstract String getServletPath(BeanContext context);
 
     protected abstract Pattern getPathPattern(BeanContext context);
 
@@ -36,6 +45,7 @@ public abstract class AbstractConsoleServlet extends SlingSafeMethodsServlet {
 
     /**
      * extension point to check access rights for a console feature by feature path
+     *
      * @return the path to the console feature (content); 'null' if no check supported or check switched off
      */
     protected String getConsolePath(BeanContext context) {
@@ -76,8 +86,14 @@ public abstract class AbstractConsoleServlet extends SlingSafeMethodsServlet {
                 dispatcher.forward(request, response);
 
             } else {
-                // redirect to suffix path without console view if access not granted
-                response.sendRedirect(LinkUtil.getUrl(request, getRequestPath(request)));
+                // answer with 'forbidden' if access not granted (and give a chance for a new login)
+                response.sendError(HttpServletResponse.SC_FORBIDDEN);
+            }
+        } else {
+            if (pathInfo.equals(getServletPath(context))) {
+                response.sendRedirect(LinkUtil.getUrl(request, pathInfo + EXT_HTML));
+            } else {
+                response.sendError(HttpServletResponse.SC_BAD_REQUEST);
             }
         }
     }
@@ -94,13 +110,19 @@ public abstract class AbstractConsoleServlet extends SlingSafeMethodsServlet {
 
     /**
      * Check access rights to the servlets path - is checking ACLs of the console path
+     *
      * @param context the current request
      * @return 'true' if access granted or access check switched off
      */
     protected boolean checkConsoleAccess(BeanContext context) {
         String consolePath = getConsolePath(context);
         if (StringUtils.isNotBlank(consolePath)) {
-            return context.getResolver().getResource(consolePath) != null;
+            Resource resource = context.getResolver().getResource(consolePath);
+            if (resource == null) {
+                LOG.info("Access to {} denied for {}", consolePath,
+                        context.getResolver().getUserID());
+            }
+            return resource != null;
         }
         return true;
     }

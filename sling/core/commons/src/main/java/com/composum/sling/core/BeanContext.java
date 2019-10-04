@@ -12,6 +12,7 @@ import org.apache.sling.api.resource.ResourceResolver;
 import org.apache.sling.api.resource.ValueMap;
 import org.apache.sling.api.scripting.SlingBindings;
 import org.apache.sling.api.scripting.SlingScriptHelper;
+import org.apache.sling.api.wrappers.SlingHttpServletRequestWrapper;
 import org.apache.sling.commons.classloader.DynamicClassLoaderManager;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.InvalidSyntaxException;
@@ -597,6 +598,13 @@ public interface BeanContext extends Adaptable {
             this.response = response;
         }
 
+        public Servlet(ServletContext servletContext, BundleContext bundleContext,
+                       SlingHttpServletRequest request, SlingHttpServletResponse response,
+                       Resource resource) {
+            this(servletContext, bundleContext, request, response);
+            this.resource = resource;
+        }
+
         @Override
         public Resource getResource() {
             if (resource == null) {
@@ -713,31 +721,61 @@ public interface BeanContext extends Adaptable {
      */
     class Wrapper implements BeanContext {
 
-        protected final BeanContext beanContext;
+        protected BeanContext beanContext;
         protected final ResourceResolver resolver;
+        protected final Resource resource;
+
+        class ContextRequest extends SlingHttpServletRequestWrapper {
+
+            public ContextRequest(SlingHttpServletRequest request) {
+                super(request);
+            }
+
+            @Override
+            public ResourceResolver getResourceResolver() {
+                return resolver;
+            }
+        }
+
+        private transient SlingHttpServletRequest request;
 
         public Wrapper(BeanContext beanContext) {
             this(beanContext, beanContext.getResolver());
         }
 
         public Wrapper(BeanContext beanContext, ResourceResolver resolverToUse) {
+            this(beanContext, resolverToUse, null);
+        }
+
+        public Wrapper(BeanContext beanContext, Resource resourceToUse) {
+            this(beanContext, null, resourceToUse);
+        }
+
+        public Wrapper(BeanContext beanContext, ResourceResolver resolverToUse, Resource resourceToUse) {
             this.beanContext = beanContext;
             this.resolver = resolverToUse;
+            this.resource = resourceToUse;
         }
 
         @Override
         public Resource getResource() {
-            return beanContext.getResource();
+            return resource != null ? resource : beanContext.getResource();
         }
 
         @Override
         public ResourceResolver getResolver() {
-            return resolver;
+            return resolver != null ? resolver : beanContext.getResolver();
         }
 
         @Override
         public SlingHttpServletRequest getRequest() {
-            return beanContext.getRequest();
+            if (request == null) {
+                SlingHttpServletRequest beanRequest = beanContext.getRequest();
+                if (beanRequest != null) {
+                    request = new ContextRequest(beanRequest);
+                }
+            }
+            return request;
         }
 
         @Override

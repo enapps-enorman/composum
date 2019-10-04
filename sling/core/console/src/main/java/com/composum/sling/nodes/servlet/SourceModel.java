@@ -20,15 +20,16 @@ import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.math.BigDecimal;
+import java.nio.file.attribute.FileTime;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -36,20 +37,6 @@ import java.util.zip.ZipOutputStream;
 public class SourceModel extends ConsoleSlingBean {
 
     private static final Logger LOG = LoggerFactory.getLogger(SourceModel.class);
-
-    // TODO move to configuration
-    public static final Map<String, String> NAMESPACES;
-
-    static {
-        NAMESPACES = new HashMap<>();
-        NAMESPACES.put("jcr", "http://www.jcp.org/jcr/1.0");
-        NAMESPACES.put("nt", "http://www.jcp.org/jcr/nt/1.0");
-        NAMESPACES.put("mix", "http://www.jcp.org/jcr/mix/1.0");
-        NAMESPACES.put("sling", "http://sling.apache.org/jcr/sling/1.0");
-        NAMESPACES.put("cpp", "http://sling.composum.com/pages/1.0");
-        NAMESPACES.put("cpa", "http://sling.composum.com/assets/1.0");
-        NAMESPACES.put("cq", "http://www.day.com/jcr/cq/1.0");
-    }
 
     // TODO move to configuration
     public static final List<Pattern> EXCLUDED_PROPS;
@@ -71,6 +58,8 @@ public class SourceModel extends ConsoleSlingBean {
     }
 
     public static final String DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSSXXX";
+
+    public static final FileTime NO_TIME = FileTime.from(0, TimeUnit.MILLISECONDS);
 
     public class Property implements Comparable<Property> {
 
@@ -178,20 +167,33 @@ public class SourceModel extends ConsoleSlingBean {
 
     protected final NodesConfiguration config;
 
+    private transient FileTime lastModified;
     private transient List<Property> propertyList;
     private transient List<Resource> subnodeList;
 
     public SourceModel(NodesConfiguration config, BeanContext context, Resource resource) {
+        if ("/".equals(ResourceUtil.normalize(resource.getPath())))
+            throw new IllegalArgumentException("Cannot export the whole JCR - " + resource.getPath());
         this.config = config;
         initialize(context, resource);
     }
 
+    @Override
     public String getName() {
         return resource.getName();
     }
 
     public String getPrimaryType() {
         return StringUtils.defaultString(ResourceUtil.getPrimaryType(resource));
+    }
+
+    public FileTime getLastModified() {
+        if (lastModified == null) {
+            Calendar timestamp = resource.getProperties().get(JcrConstants.JCR_LASTMODIFIED, Calendar.class);
+            lastModified = timestamp != null ?
+                    FileTime.from(timestamp.getTimeInMillis(), TimeUnit.MILLISECONDS) : NO_TIME;
+        }
+        return lastModified == NO_TIME ? null : lastModified;
     }
 
     public List<Property> getPropertyList() {
@@ -243,6 +245,7 @@ public class SourceModel extends ConsoleSlingBean {
             String ns = property.getNs();
             addNamespace(keys, ns);
         }
+        addNameNamespace(keys, resource.getName());
         if (contentOnly) {
             Resource contentResource;
             if ((contentResource = resource.getChild(JcrConstants.JCR_CONTENT)) != null) {
@@ -363,8 +366,12 @@ public class SourceModel extends ConsoleSlingBean {
 
         ZipEntry entry;
         String path = resource.getPath();
+        FileTime lastModified = getLastModified();
 
         entry = new ZipEntry(getZipName(root, path + "/.content.xml"));
+        if (lastModified != null) {
+            entry.setLastModifiedTime(lastModified);
+        }
         zipStream.putNextEntry(entry);
         Writer writer = new OutputStreamWriter(zipStream, "UTF-8");
         writeFile(writer, true);
@@ -409,7 +416,7 @@ public class SourceModel extends ConsoleSlingBean {
 
     // XML output
 
-    public void writeFile(Writer writer, boolean contentOnly) throws IOException {
+    public void writeFile(Writer writer, boolean contentOnly) throws IOException, RepositoryException {
         List<String> namespaces = new ArrayList<>();
         namespaces.add("jcr");
         determineNamespaces(namespaces, contentOnly);
@@ -418,7 +425,7 @@ public class SourceModel extends ConsoleSlingBean {
         writer.append("<jcr:root");
         for (int i = 0; i < namespaces.size(); ) {
             String ns = namespaces.get(i);
-            String url = NAMESPACES.get(ns);
+            String url = getSession().getNamespaceURI(ns);
             if (StringUtils.isNotBlank(url)) {
                 writer.append(" xmlns:").append(ns).append("=\"").append(url).append("\"");
                 if (++i < namespaces.size()) {
@@ -428,8 +435,8 @@ public class SourceModel extends ConsoleSlingBean {
                 i++;
             }
         }
-        writeProperty(writer, "        ", "jcr:primaryType", getPrimaryType());
-        writeProperties(writer, "        ");
+        writeProperty(writer, "          ", "jcr:primaryType", getPrimaryType());
+        writeProperties(writer, "          ");
         writer.append(">\n");
         Resource contentResource;
         if ((contentResource = resource.getChild(JcrConstants.JCR_CONTENT)) != null) {
@@ -495,7 +502,7 @@ public class SourceModel extends ConsoleSlingBean {
                 .replaceAll("\"", "&quot;");
     }
 
-    public String escapeXmlAttribute(String value) {
+    public String escapeXmlAttribute(String value) { // FIXME(hps,2019-07-11) use utilities? Should be consistent with packge manager, though.
         return value
                 .replaceAll("&", "&amp;")
                 .replaceAll("<", "&lt;")
